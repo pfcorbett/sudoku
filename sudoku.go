@@ -78,6 +78,7 @@ func main() {
 	}
 	bufferChan = make(chan UpdateMsg, max_bufferchan)
 	err := captureBoard(os.Args[1])
+	fmt.Println("Here in main")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -91,6 +92,7 @@ func main() {
 	}
 	close(abortChan)
 	close(bufferChan)
+	displayBoard()
 }
 
 func roundLooper() {
@@ -102,15 +104,21 @@ loop:
 		wg1.Add(81) // Reset the worker wait group for the next round
 		wg2.Done()  // Release the workers to start the next round
 
+		displayBoard()
 		// Now we drain the buffer channel and forward the next round messages to the waiting workers
 		// First check capacity
 		if len(bufferChan) == cap(bufferChan) {
 			panic("buffer channel is full, this is bad")
 		}
+		cnt := len(bufferChan)
+		// Forward all the enqueued messages
 		for msg := range bufferChan {
 			board[msg.destR][msg.destC].inChan <- msg
+			cnt--
+			if cnt == 0 {
+				break
+			}
 		}
-		displayBoard()
 		// listen to the abort channel to see if we should stop
 		select {
 		case <-abortChan:
@@ -119,23 +127,6 @@ loop:
 			continue
 		}
 	}
-}
-
-func finalCheckVal(val SquareVal) (rv bool) {
-	if val == one ||
-		val == two ||
-		val == three ||
-		val == four ||
-		val == five ||
-		val == six ||
-		val == seven ||
-		val == eight ||
-		val == nine {
-		rv = true
-	} else {
-		rv = false
-	}
-	return
 }
 
 func squareMonitor(i, j int) {
@@ -303,6 +294,23 @@ func inspectBox(r, c int) {
 			bufferChan <- UpdateMsg{val, set, rpos, cpos}
 		}
 	}
+}
+
+func finalCheckVal(val SquareVal) (rv bool) {
+	if val == one ||
+		val == two ||
+		val == three ||
+		val == four ||
+		val == five ||
+		val == six ||
+		val == seven ||
+		val == eight ||
+		val == nine {
+		rv = true
+	} else {
+		rv = false
+	}
+	return
 }
 
 func displaySquare(v SquareVal) (s string) {
