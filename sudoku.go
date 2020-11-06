@@ -37,6 +37,7 @@ type Action int
 const (
 	set Action = iota
 	clear
+	pause
 )
 
 type UpdateMsg struct {
@@ -78,7 +79,6 @@ func main() {
 	}
 	bufferChan = make(chan UpdateMsg, max_bufferchan)
 	err := captureBoard(os.Args[1])
-	fmt.Println("Here in main")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -119,7 +119,12 @@ loop:
 				break
 			}
 		}
-		// listen to the abort channel to see if we should stop
+		for i := 0; i < 9; i++ {
+			for j := 0; j < 9; j++ {
+				board[i][j].inChan <- UpdateMsg{action: pause}
+			}
+		}
+		// Listen to the abort channel to see if we should stop
 		select {
 		case <-abortChan:
 			break loop
@@ -131,17 +136,15 @@ loop:
 
 func squareMonitor(i, j int) {
 	sqr := &board[i][j]
-	pollCnt := 0
 outerloop:
 	for {
 		select {
 		case msg := <-sqr.inChan:
-			pollCnt = 0
-			if sqr.isFinal {
-				continue outerloop
-			}
 			switch msg.action {
 			case set:
+				if sqr.isFinal {
+					continue outerloop
+				}
 				if sqr.possVal != msg.val {
 					sqr.possVal = msg.val
 					if finalCheckVal(sqr.possVal) {
@@ -156,6 +159,9 @@ outerloop:
 					}
 				}
 			case clear:
+				if sqr.isFinal {
+					continue outerloop
+				}
 				newval := sqr.possVal &^ msg.val
 				if newval == sqr.possVal {
 					// no change to square value
@@ -173,8 +179,11 @@ outerloop:
 						wg3.Add(-1)
 					}
 				}
+			case pause:
+				wg1.Done() // Waitgroup 1 tracks the number of squares that are still active in this round.
+				wg2.Wait() // Waitgroup 2 is used to restart all the square monitor threads at once in a new round.  It toggles between 1 and 0
 			default:
-				continue
+				panic("Should always have an action")
 			}
 		case <-abortChan:
 			// Global abort signal received (via main closing the abortChan)
@@ -183,16 +192,8 @@ outerloop:
 			}
 			break outerloop
 		default:
-			// Nothing coming in, sleep and poll a few times before assuming this round is complete
-			// Worst case, we shift a message to the next round
-			pollCnt++
-			if pollCnt < maxpoll {
-				time.Sleep(time.Millisecond * sleep_msec)
-			} else {
-				wg1.Done() // Waitgroup 1 tracks the number of squares that are still active in this round.
-				wg2.Wait() // Waitgroup 2 is used to restart all the square monitor threads at once in a new round.  It toggles between 1 and 0
-				pollCnt = 0
-			}
+			// Nothing coming in, sleep for a bit
+			time.Sleep(time.Millisecond * sleep_msec)
 		}
 	}
 }
@@ -297,15 +298,18 @@ func inspectBox(r, c int) {
 }
 
 func finalCheckVal(val squareVal) (rv bool) {
-	if val == one ||
-		val == two ||
-		val == three ||
-		val == four ||
-		val == five ||
-		val == six ||
-		val == seven ||
-		val == eight ||
-		val == nine {
+	finalVal := map[squareVal]bool{
+		one:   true,
+		two:   true,
+		three: true,
+		four:  true,
+		five:  true,
+		six:   true,
+		seven: true,
+		eight: true,
+		nine:  true,
+	}
+	if finalVal[val] {
 		rv = true
 	} else {
 		rv = false
@@ -335,6 +339,7 @@ func captureBoard(inFileName string) error {
 				return fmt.Errorf("Invalid input line %d, position %d", i, j)
 			} else {
 				board[i][j].inChan <- UpdateMsg{intToVal[iv[j]], set, i, j}
+				board[i][j].inChan <- UpdateMsg{action: pause}
 			}
 		}
 	}
