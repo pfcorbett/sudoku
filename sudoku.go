@@ -59,6 +59,7 @@ var board [9][9]square
 var wg1 sync.WaitGroup
 var wg2 sync.WaitGroup
 var wg3 sync.WaitGroup
+var wg4 sync.WaitGroup
 
 func main() {
 	if len(os.Args) < 2 {
@@ -68,6 +69,7 @@ func main() {
 	abortChan = make(chan struct{})
 	wg1.Add(9 * 9)
 	wg3.Add(9 * 9)
+	wg4.Add(9 * 9)
 	// sentCnt and rcvdCnt arrays should both be initialized to 0
 	for i := 0; i < 9; i++ {
 		for j := 0; j < 9; j++ {
@@ -85,14 +87,11 @@ func main() {
 	}
 	go roundLooper()
 	wg3.Wait()
-	for i := 0; i < 9; i++ {
-		for j := 0; j < 9; j++ {
-			close(board[i][j].inChan)
-		}
-	}
 	close(abortChan)
+	wg4.Wait()
 	close(bufferChan)
-	displayBoard()
+	// Clear all the output before quitting program
+	time.Sleep(time.Millisecond)
 }
 
 func roundLooper() {
@@ -105,6 +104,18 @@ loop:
 		wg2.Done()  // Release the workers to start the next round
 
 		displayBoard()
+		// Check the abort channel to see if we should stop
+		select {
+		case <-abortChan:
+			for i := 0; i < 9; i++ {
+				for j := 0; j < 9; j++ {
+					close(board[i][j].inChan)
+				}
+			}
+			break loop
+		default:
+			// do nothing, make select non-blocking
+		}
 		// Now we drain the buffer channel and forward the next round messages to the waiting workers
 		// First check capacity
 		if len(bufferChan) == cap(bufferChan) {
@@ -123,13 +134,6 @@ loop:
 			for j := 0; j < 9; j++ {
 				board[i][j].inChan <- UpdateMsg{action: pause}
 			}
-		}
-		// Listen to the abort channel to see if we should stop
-		select {
-		case <-abortChan:
-			break loop
-		default:
-			continue
 		}
 	}
 }
@@ -187,6 +191,8 @@ outerloop:
 			}
 		case <-abortChan:
 			// Global abort signal received (via main closing the abortChan)
+			wg1.Done()
+			wg4.Done()
 			if !sqr.isFinal {
 				panic("should not get here if wg is zero")
 			}
@@ -346,32 +352,23 @@ func captureBoard(inFileName string) error {
 	return nil
 }
 
-var valToStr = map[squareVal]string{
-	one:   "1",
-	two:   "2",
-	three: "3",
-	four:  "4",
-	five:  "5",
-	six:   "6",
-	seven: "7",
-	eight: "8",
-	nine:  "9",
-	blank: " ",
-}
-
-//func displaySquare(v squareVal) (s string) {
-//s = valToStr[v]
-//if s == "" {
-//s = "_"
-//}
-//return
-//}
-
 func displayBoard() {
+	var valToStr = map[squareVal]string{
+		one:   "1",
+		two:   "2",
+		three: "3",
+		four:  "4",
+		five:  "5",
+		six:   "6",
+		seven: "7",
+		eight: "8",
+		nine:  "9",
+		blank: " ",
+	}
 	displaySquare := func(v squareVal) (s string) {
 		s = valToStr[v]
 		if s == "" {
-			s = "_"
+			s = " "
 		}
 		return
 	}
