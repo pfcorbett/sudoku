@@ -69,7 +69,7 @@ func main() {
 	abortChan = make(chan struct{})
 	wg1.Add(9 * 9)
 	wg3.Add(9 * 9)
-	wg4.Add(9 * 9)
+	wg4.Add(9*9 + 1)
 	// sentCnt and rcvdCnt arrays should both be initialized to 0
 	for i := 0; i < 9; i++ {
 		for j := 0; j < 9; j++ {
@@ -88,10 +88,8 @@ func main() {
 	go roundLooper()
 	wg3.Wait()
 	close(abortChan)
-	wg4.Wait()
 	close(bufferChan)
-	// Clear all the output before quitting program
-	time.Sleep(time.Millisecond)
+	wg4.Wait()
 }
 
 func roundLooper() {
@@ -112,16 +110,21 @@ loop:
 					close(board[i][j].inChan)
 				}
 			}
+			wg4.Done()
 			break loop
 		default:
 			// do nothing, make select non-blocking
 		}
 		// Now we drain the buffer channel and forward the next round messages to the waiting workers
 		// First check capacity
-		if len(bufferChan) == cap(bufferChan) {
+		cnt := len(bufferChan)
+		if cnt == cap(bufferChan) {
 			panic("buffer channel is full, this is bad")
 		}
-		cnt := len(bufferChan)
+		if cnt == 0 {
+			// Made no progress this round
+			fmt.Printf("No progress in round")
+		}
 		// Forward all the enqueued messages
 		for msg := range bufferChan {
 			board[msg.destR][msg.destC].inChan <- msg
