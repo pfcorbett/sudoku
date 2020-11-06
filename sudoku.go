@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-type SquareVal uint16
+type squareVal uint16
 
 const (
-	one SquareVal = 1 << iota
+	one squareVal = 1 << iota
 	two
 	three
 	four
@@ -40,21 +40,21 @@ const (
 )
 
 type UpdateMsg struct {
-	val    SquareVal
+	val    squareVal
 	action Action
 	destR  int
 	destC  int
 }
 
-type Square struct {
-	possVal SquareVal
+type square struct {
+	possVal squareVal
 	inChan  chan UpdateMsg
 	isFinal bool
 }
 
 var abortChan chan struct{}
 var bufferChan chan UpdateMsg
-var board [9][9]Square
+var board [9][9]square
 var wg1 sync.WaitGroup
 var wg2 sync.WaitGroup
 var wg3 sync.WaitGroup
@@ -296,7 +296,7 @@ func inspectBox(r, c int) {
 	}
 }
 
-func finalCheckVal(val SquareVal) (rv bool) {
+func finalCheckVal(val squareVal) (rv bool) {
 	if val == one ||
 		val == two ||
 		val == three ||
@@ -313,34 +313,6 @@ func finalCheckVal(val SquareVal) (rv bool) {
 	return
 }
 
-func displaySquare(v SquareVal) (s string) {
-	switch v {
-	case one:
-		s = "1"
-	case two:
-		s = "2"
-	case three:
-		s = "3"
-	case four:
-		s = "4"
-	case five:
-		s = "5"
-	case six:
-		s = "6"
-	case seven:
-		s = "7"
-	case eight:
-		s = "8"
-	case nine:
-		s = "9"
-	case blank:
-		s = " "
-	default:
-		s = "?"
-	}
-	return
-}
-
 func captureBoard(inFileName string) error {
 	inFile, err := os.Open(inFileName)
 	if err != nil {
@@ -348,6 +320,9 @@ func captureBoard(inFileName string) error {
 	}
 	for i := 0; i < 9; i++ {
 		var iv [9]int
+
+		intToVal := [...]squareVal{blank, one, two, three, four, five, six, seven, eight, nine}
+
 		n, err := fmt.Fscanf(inFile, "%d,%d,%d;%d,%d,%d;%d,%d,%d;\n", &iv[0], &iv[1], &iv[2], &iv[3], &iv[4], &iv[5], &iv[6], &iv[7], &iv[8])
 		if err != nil {
 			return fmt.Errorf("Error reading file %s: %v", inFileName, err)
@@ -359,37 +334,43 @@ func captureBoard(inFileName string) error {
 			if iv[j] < 0 || iv[j] > 9 {
 				return fmt.Errorf("Invalid input line %d, position %d", i, j)
 			} else {
-				switch iv[j] {
-				case 1:
-					board[i][j].inChan <- UpdateMsg{one, set, i, j}
-				case 2:
-					board[i][j].inChan <- UpdateMsg{two, set, i, j}
-				case 3:
-					board[i][j].inChan <- UpdateMsg{three, set, i, j}
-				case 4:
-					board[i][j].inChan <- UpdateMsg{four, set, i, j}
-				case 5:
-					board[i][j].inChan <- UpdateMsg{five, set, i, j}
-				case 6:
-					board[i][j].inChan <- UpdateMsg{six, set, i, j}
-				case 7:
-					board[i][j].inChan <- UpdateMsg{seven, set, i, j}
-				case 8:
-					board[i][j].inChan <- UpdateMsg{eight, set, i, j}
-				case 9:
-					board[i][j].inChan <- UpdateMsg{nine, set, i, j}
-				case 0:
-					continue
-				default:
-					panic("Bad character value in input file")
-				}
+				board[i][j].inChan <- UpdateMsg{intToVal[iv[j]], set, i, j}
 			}
 		}
 	}
 	return nil
 }
 
+var valToStr = map[squareVal]string{
+	one:   "1",
+	two:   "2",
+	three: "3",
+	four:  "4",
+	five:  "5",
+	six:   "6",
+	seven: "7",
+	eight: "8",
+	nine:  "9",
+	blank: " ",
+}
+
+//func displaySquare(v squareVal) (s string) {
+//s = valToStr[v]
+//if s == "" {
+//s = "_"
+//}
+//return
+//}
+
 func displayBoard() {
+	displaySquare := func(v squareVal) (s string) {
+		s = valToStr[v]
+		if s == "" {
+			s = "_"
+		}
+		return
+	}
+
 	fmt.Println("\u250F\u2501\u2501\u2501\u252F\u2501\u2501\u2501\u252F\u2501\u2501\u2501\u2533\u2501\u2501\u2501\u252F\u2501\u2501\u2501" +
 		"\u252F\u2501\u2501\u2501\u2533\u2501\u2501\u2501\u252F\u2501\u2501\u2501\u252F\u2501\u2501\u2501\u2513")
 	for i := 0; i < 9; i++ {
