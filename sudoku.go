@@ -253,6 +253,7 @@ func sendUpdates(r, c int, msg UpdateMsg) {
 }
 
 func inspectRow(r, c int) {
+	// First look for lone singles
 	for val := one; val <= nine; val <<= 1 {
 		cnt := 0
 		cpos := -1
@@ -269,6 +270,7 @@ func inspectRow(r, c int) {
 }
 
 func inspectCol(r, c int) {
+	// First look for lone singles
 	for val := one; val <= nine; val <<= 1 {
 		cnt := 0
 		rpos := -1
@@ -285,6 +287,7 @@ func inspectCol(r, c int) {
 }
 
 func inspectBox(r, c int) {
+	// First look for lone singles
 	for val := one; val <= nine; val <<= 1 {
 		cnt := 0
 		rpos := -1
