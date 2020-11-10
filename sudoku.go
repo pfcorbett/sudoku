@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 )
 
 type squareVal uint16
@@ -27,9 +26,8 @@ const (
 )
 const blank = one | two | three | four | five | six | seven | eight | nine
 
-const maxpoll = 10
 const sleep_msec = 10
-const max_bufferchan = 81 * (20 + 5)
+const max_bufferchan = 40 * 20
 const max_inchan = 50
 
 type Action int
@@ -38,6 +36,9 @@ const (
 	set Action = iota
 	clear
 	pause
+	analyseRow
+	analyseCol
+	analyseBox
 )
 
 type UpdateMsg struct {
@@ -57,9 +58,11 @@ var abortChan chan struct{}
 var bufferChan chan UpdateMsg
 var board [9][9]square
 var wg1 sync.WaitGroup
-var wg2 sync.WaitGroup
+
+//var wg2 sync.WaitGroup
 var wg3 sync.WaitGroup
 var wg4 sync.WaitGroup
+var wgRCB sync.WaitGroup
 
 func main() {
 	if len(os.Args) < 2 {
@@ -80,51 +83,31 @@ func main() {
 		}
 	}
 	bufferChan = make(chan UpdateMsg, max_bufferchan)
+	go roundLooper()
+
 	err := captureBoard(os.Args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	go roundLooper()
 	wg3.Wait()
-	close(abortChan)
+	//close(abortChan)
 	close(bufferChan)
 	wg4.Wait()
 }
 
 func roundLooper() {
-loop:
-	for {
-		// Collect messages from each round, wait for each round to quiesce, then distribute messages to next round
-		wg2.Add(1)  // Use this to block all workers after they've hit the quiesce point
-		wg1.Wait()  // All square monitor goroutines have quiesced.
-		wg1.Add(81) // Reset the worker wait group for the next round
-		wg2.Done()  // Release the workers to start the next round
-
-		displayBoard()
-		// Check the abort channel to see if we should stop
-		select {
-		case <-abortChan:
-			for i := 0; i < 9; i++ {
-				for j := 0; j < 9; j++ {
-					close(board[i][j].inChan)
-				}
-			}
-			wg4.Done()
-			break loop
-		default:
-			// do nothing, make select non-blocking
-		}
-		// Now we drain the buffer channel and forward the next round messages to the waiting workers
+	forwardMsgs := func() {
+		// Drain the buffer channel and forward the next round messages to the waiting workers
 		// First check capacity
 		cnt := len(bufferChan)
 		if cnt == cap(bufferChan) {
 			panic("buffer channel is full, this is bad")
 		}
-		if cnt == 0 {
-			// Made no progress this round
-			fmt.Printf("No progress in round")
-		}
+		//if cnt == 0 {
+		// Made no progress this round
+		//fmt.Printf("No progress in round")
+		//}
 		// Forward all the enqueued messages
 		for msg := range bufferChan {
 			board[msg.destR][msg.destC].inChan <- msg
@@ -133,10 +116,71 @@ loop:
 				break
 			}
 		}
+	}
+
+	pauseMonitors := func() {
 		for i := 0; i < 9; i++ {
 			for j := 0; j < 9; j++ {
 				board[i][j].inChan <- UpdateMsg{action: pause}
 			}
+		}
+		wg1.Wait()
+		wg1.Add(81)
+	}
+
+	abortFlag := false
+	go func() {
+		wg3.Wait()
+		abortFlag = true
+	}()
+
+	wg1.Wait()  // All square monitor goroutines have quiesced.
+	wg1.Add(81) // Reset the worker wait group for the next round
+	//loop:
+	for !abortFlag {
+		// Collect messages from each round, wait for each round to quiesce, then distribute messages to next round
+		//wg2.Add(1)  	// Use this to block all workers after they've hit the quiesce point
+		//wg2.Done()  	// Release the workers to start the next round
+
+		displayBoard()
+		// Check the abort channel to see if we should stop
+		//select {
+		//case <-abortChan:
+		//for i := 0; i < 9; i++ {
+		//for j := 0; j < 9; j++ {
+		//close(board[i][j].inChan)
+		//}
+		//}
+		//wg4.Done()
+		//break loop
+		//default:
+		//// do nothing, make select non-blocking
+		//}
+		forwardMsgs()
+		pauseMonitors()
+		wgRCB.Add(27)
+		inspectRCB()
+		wgRCB.Wait()
+		forwardMsgs()
+		pauseMonitors()
+	}
+	displayBoard()
+	wg4.Done()
+	close(abortChan)
+	return
+
+}
+
+func inspectRCB() {
+	for i := 0; i < 9; i++ {
+		board[i][i].inChan <- UpdateMsg{action: analyseRow}
+	}
+	for i := 0; i < 9; i++ {
+		board[i][(i+1)%9].inChan <- UpdateMsg{action: analyseCol}
+	}
+	for i := 0; i < 9; i += 3 {
+		for j := 2; j < 9; j += 3 {
+			board[i][j].inChan <- UpdateMsg{action: analyseBox}
 		}
 	}
 }
@@ -157,10 +201,6 @@ outerloop:
 					if finalCheckVal(sqr.possVal) {
 						sqr.isFinal = true
 						sendUpdates(i, j, UpdateMsg{msg.val, clear, -1, -1})
-						// Track squares that are finalized
-						inspectRow(i, j)
-						inspectCol(i, j)
-						inspectBox(i, j)
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
 						wg3.Add(-1)
 					}
@@ -178,31 +218,33 @@ outerloop:
 					if finalCheckVal(sqr.possVal) {
 						sqr.isFinal = true
 						sendUpdates(i, j, UpdateMsg{newval, clear, -1, -1})
-						// Track squares that are finalized
-						inspectRow(i, j)
-						inspectCol(i, j)
-						inspectBox(i, j)
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
 						wg3.Add(-1)
 					}
 				}
 			case pause:
 				wg1.Done() // Waitgroup 1 tracks the number of squares that are still active in this round.
-				wg2.Wait() // Waitgroup 2 is used to restart all the square monitor threads at once in a new round.  It toggles between 1 and 0
+				//wg2.Wait() // Waitgroup 2 is used to restart all the square monitor threads at once in a new round.  It toggles between 1 and 0
+			case analyseRow:
+				inspectRow(i, j)
+				wgRCB.Done()
+			case analyseCol:
+				inspectCol(i, j)
+				wgRCB.Done()
+			case analyseBox:
+				inspectBox(i, j)
+				wgRCB.Done()
 			default:
 				panic("Should always have an action")
 			}
 		case <-abortChan:
 			// Global abort signal received (via main closing the abortChan)
-			wg1.Done()
-			wg4.Done()
+			//wg1.Done()
 			if !sqr.isFinal {
 				panic("should not get here if wg is zero")
 			}
+			wg4.Done()
 			break outerloop
-		default:
-			// Nothing coming in, sleep for a bit
-			time.Sleep(time.Millisecond * sleep_msec)
 		}
 	}
 }
@@ -253,58 +295,156 @@ func sendUpdates(r, c int, msg UpdateMsg) {
 }
 
 func inspectRow(r, c int) {
-	// First look for lone singles
+	// Count and locate each possible number in the remaining squares
+	colPos := make(map[squareVal][]int)
 	for val := one; val <= nine; val <<= 1 {
-		cnt := 0
-		cpos := -1
 		for j := 0; j < 9; j++ {
 			if board[r][j].possVal&val == val {
-				cnt++
-				cpos = j
+				// square could be this value
+				colPos[val] = append(colPos[val], j)
 			}
 		}
-		if cnt == 1 && !board[r][cpos].isFinal {
-			bufferChan <- UpdateMsg{val, set, r, cpos}
+		if len(colPos[val]) == 0 {
+			panic("this is a problem, number not found in row")
+		}
+		// Check for previously unknown singletons in the row
+		if len(colPos[val]) == 1 {
+			cPos := colPos[val][0]
+			if !board[r][cPos].isFinal {
+				bufferChan <- UpdateMsg{val, set, r, cPos}
+			}
+		} else {
+			// Check if all possible locations for the number are within the same box
+			cPosLow := colPos[val][0]
+			cPosLast := len(colPos[val]) - 1
+			cPosHigh := colPos[val][cPosLast]
+			if cPosLow/3 == cPosHigh/3 {
+				// All instances of the number are in the same box.
+				cb := cPosLow / 3 * 3
+				rb := r / 3 * 3
+				for ri := rb; ri < rb+3; ri++ {
+					if ri == r {
+						continue
+					}
+					for ci := cb; ci < cb+3; ci++ {
+						bufferChan <- UpdateMsg{val, clear, ri, ci}
+					}
+				}
+			}
 		}
 	}
 }
 
 func inspectCol(r, c int) {
-	// First look for lone singles
+	// Count and locate each possible number in the remaining squares
+	rowPos := make(map[squareVal][]int)
 	for val := one; val <= nine; val <<= 1 {
-		cnt := 0
-		rpos := -1
 		for i := 0; i < 9; i++ {
 			if board[i][c].possVal&val == val {
-				cnt++
-				rpos = i
+				// square could be this value
+				rowPos[val] = append(rowPos[val], i)
 			}
 		}
-		if cnt == 1 && !board[rpos][c].isFinal {
-			bufferChan <- UpdateMsg{val, set, rpos, c}
+		if len(rowPos[val]) == 0 {
+			panic("this is a problem, number not found in column")
+		}
+		// Check for previously unknown singletons in the column
+		if len(rowPos[val]) == 1 {
+			rPos := rowPos[val][0]
+			if !board[rPos][c].isFinal {
+				bufferChan <- UpdateMsg{val, set, rPos, c}
+			}
+		} else {
+			// Check if all possible locations for the number are within the same box
+			rPosLow := rowPos[val][0]
+			rPosLast := len(rowPos[val]) - 1
+			rPosHigh := rowPos[val][rPosLast]
+			if rPosLow/3 == rPosHigh/3 {
+				// All instances of the number are in the same box.
+				rb := rPosLow / 3 * 3
+				cb := c / 3 * 3
+				for ci := cb; ci < cb+3; ci++ {
+					if ci == c {
+						continue
+					}
+					for ri := rb; ri < rb+3; ri++ {
+						bufferChan <- UpdateMsg{val, clear, ri, ci}
+					}
+				}
+			}
 		}
 	}
 }
 
 func inspectBox(r, c int) {
-	// First look for lone singles
+	type boxPosStruct struct {
+		r int
+		c int
+	}
+	// Count and locate each possible number in the remaining squares
 	for val := one; val <= nine; val <<= 1 {
-		cnt := 0
-		rpos := -1
-		cpos := -1
+		boxRowPos := make(map[squareVal][]boxPosStruct)
+		boxColPos := make(map[squareVal][]boxPosStruct)
 		rb := r / 3 * 3
 		cb := c / 3 * 3
-		for i := 0; i < 3; i++ {
-			for j := 0; j < 3; j++ {
-				if board[rb+i][cb+j].possVal&val == val {
-					cnt++
-					rpos = rb + i
-					cpos = cb + j
+		for i := rb; i < rb+3; i++ {
+			for j := cb; j < cb+3; j++ {
+				if board[i][j].possVal&val == val {
+					// square could be this value
+					boxRowPos[val] = append(boxRowPos[val], boxPosStruct{i, j})
 				}
 			}
 		}
-		if cnt == 1 && !board[rpos][cpos].isFinal {
-			bufferChan <- UpdateMsg{val, set, rpos, cpos}
+		for j := cb; j < cb+3; j++ {
+			for i := rb; i < rb+3; i++ {
+				if board[i][j].possVal&val == val {
+					// square could be this value
+					boxColPos[val] = append(boxColPos[val], boxPosStruct{i, j})
+				}
+			}
+		}
+		if len(boxRowPos[val]) != len(boxColPos[val]) {
+			panic("these should be equal")
+		}
+		if len(boxRowPos[val]) == 0 {
+			panic("this is a problem, number not found in box")
+		}
+		// Check for previously unknown singletons in the box
+		if len(boxRowPos[val]) == 1 {
+			rPos := boxRowPos[val][0].r
+			cPos := boxRowPos[val][0].c
+			if !board[rPos][cPos].isFinal {
+				bufferChan <- UpdateMsg{val, set, rPos, cPos}
+			}
+		} else {
+			// Check if all possible locations for the number are within the same row or column
+			boxPosLast := len(boxRowPos[val]) - 1
+			rPosLow := boxRowPos[val][0].r
+			rPosHigh := boxRowPos[val][boxPosLast].r
+			cPosLow := boxColPos[val][0].c
+			cPosHigh := boxColPos[val][boxPosLast].c
+			if rPosLow == rPosHigh {
+				// All possible locations of the number in this box are in the same row.
+				for ri := rb; ri < rb+3; ri++ {
+					if ri == rPosLow {
+						continue
+					}
+					for ci := cb; ci < cb+3; ci++ {
+						bufferChan <- UpdateMsg{val, clear, ri, ci}
+					}
+				}
+			}
+			if cPosLow == cPosHigh {
+				// All possible locations of the number in this box are in the same column.
+				for ci := cb; ci < cb+3; ci++ {
+					if ci == cPosLow {
+						continue
+					}
+					for ri := rb; ri < rb+3; ri++ {
+						bufferChan <- UpdateMsg{val, clear, ri, ci}
+					}
+				}
+			}
 		}
 	}
 }
