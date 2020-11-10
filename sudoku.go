@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"math/bits"
 	"os"
 	"sync"
 )
@@ -57,11 +58,10 @@ type square struct {
 var abortChan chan struct{}
 var bufferChan chan UpdateMsg
 var board [9][9]square
-var wg1 sync.WaitGroup
+var wgRound sync.WaitGroup
 
-//var wg2 sync.WaitGroup
-var wg3 sync.WaitGroup
-var wg4 sync.WaitGroup
+var wgSqrsDone sync.WaitGroup
+var wgThrdsDone sync.WaitGroup
 var wgRCB sync.WaitGroup
 
 func main() {
@@ -70,9 +70,9 @@ func main() {
 		os.Exit(1)
 	}
 	abortChan = make(chan struct{})
-	wg1.Add(9 * 9)
-	wg3.Add(9 * 9)
-	wg4.Add(9*9 + 1)
+	wgRound.Add(9 * 9)
+	wgSqrsDone.Add(9 * 9)
+	wgThrdsDone.Add(9*9 + 1)
 	// sentCnt and rcvdCnt arrays should both be initialized to 0
 	for i := 0; i < 9; i++ {
 		for j := 0; j < 9; j++ {
@@ -90,10 +90,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	wg3.Wait()
+	wgSqrsDone.Wait()
 	//close(abortChan)
 	close(bufferChan)
-	wg4.Wait()
+	wgThrdsDone.Wait()
 }
 
 func roundLooper() {
@@ -104,10 +104,7 @@ func roundLooper() {
 		if cnt == cap(bufferChan) {
 			panic("buffer channel is full, this is bad")
 		}
-		//if cnt == 0 {
-		// Made no progress this round
-		//fmt.Printf("No progress in round")
-		//}
+
 		// Forward all the enqueued messages
 		for msg := range bufferChan {
 			board[msg.destR][msg.destC].inChan <- msg
@@ -124,38 +121,22 @@ func roundLooper() {
 				board[i][j].inChan <- UpdateMsg{action: pause}
 			}
 		}
-		wg1.Wait()
-		wg1.Add(81)
+		wgRound.Wait()
+		wgRound.Add(81)
 	}
 
 	abortFlag := false
 	go func() {
-		wg3.Wait()
+		wgSqrsDone.Wait()
 		abortFlag = true
 	}()
 
-	wg1.Wait()  // All square monitor goroutines have quiesced.
-	wg1.Add(81) // Reset the worker wait group for the next round
+	wgRound.Wait()  // All square monitor goroutines have quiesced.
+	wgRound.Add(81) // Reset the worker wait group for the next round
 	//loop:
 	for !abortFlag {
 		// Collect messages from each round, wait for each round to quiesce, then distribute messages to next round
-		//wg2.Add(1)  	// Use this to block all workers after they've hit the quiesce point
-		//wg2.Done()  	// Release the workers to start the next round
-
 		displayBoard()
-		// Check the abort channel to see if we should stop
-		//select {
-		//case <-abortChan:
-		//for i := 0; i < 9; i++ {
-		//for j := 0; j < 9; j++ {
-		//close(board[i][j].inChan)
-		//}
-		//}
-		//wg4.Done()
-		//break loop
-		//default:
-		//// do nothing, make select non-blocking
-		//}
 		forwardMsgs()
 		pauseMonitors()
 		wgRCB.Add(27)
@@ -165,10 +146,8 @@ func roundLooper() {
 		pauseMonitors()
 	}
 	displayBoard()
-	wg4.Done()
+	wgThrdsDone.Done()
 	close(abortChan)
-	return
-
 }
 
 func inspectRCB() {
@@ -202,7 +181,7 @@ outerloop:
 						sqr.isFinal = true
 						sendUpdates(i, j, UpdateMsg{msg.val, clear, -1, -1})
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
-						wg3.Add(-1)
+						wgSqrsDone.Add(-1)
 					}
 				}
 			case clear:
@@ -219,12 +198,11 @@ outerloop:
 						sqr.isFinal = true
 						sendUpdates(i, j, UpdateMsg{newval, clear, -1, -1})
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
-						wg3.Add(-1)
+						wgSqrsDone.Add(-1)
 					}
 				}
 			case pause:
-				wg1.Done() // Waitgroup 1 tracks the number of squares that are still active in this round.
-				//wg2.Wait() // Waitgroup 2 is used to restart all the square monitor threads at once in a new round.  It toggles between 1 and 0
+				wgRound.Done() // Waitgroup 1 tracks the number of squares that are still active in this round.
 			case analyseRow:
 				inspectRow(i, j)
 				wgRCB.Done()
@@ -239,11 +217,10 @@ outerloop:
 			}
 		case <-abortChan:
 			// Global abort signal received (via main closing the abortChan)
-			//wg1.Done()
 			if !sqr.isFinal {
 				panic("should not get here if wg is zero")
 			}
-			wg4.Done()
+			wgThrdsDone.Done()
 			break outerloop
 		}
 	}
@@ -450,18 +427,7 @@ func inspectBox(r, c int) {
 }
 
 func finalCheckVal(val squareVal) (rv bool) {
-	finalVal := map[squareVal]bool{
-		one:   true,
-		two:   true,
-		three: true,
-		four:  true,
-		five:  true,
-		six:   true,
-		seven: true,
-		eight: true,
-		nine:  true,
-	}
-	if finalVal[val] {
+	if bits.OnesCount16(uint16(val)) == 1 {
 		rv = true
 	} else {
 		rv = false
