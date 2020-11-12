@@ -591,7 +591,7 @@ func boxpos(b, j int) (r, c int) {
 }
 
 func checkConstrainedValues(rcb int, isRCB RCBselect) {
-	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row.
+	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row, column or box.
 	var pvCnt [9]int
 	var sqrPaired [9]bool
 	unresolvedCnt := 0
@@ -634,7 +634,7 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 					possVal1 = board[r2][c2].possVal
 				}
 				if possVal1 == possVal2 {
-					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row.
+					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row, column or box.
 					sqrPaired[j1] = true
 					sqrPaired[j2] = true
 				loop2:
@@ -660,7 +660,7 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 			}
 		}
 	}
-	// If three squares can only hold the same three values and no others, then clear those values from the rest of the row.
+	// If three squares can only hold the same three values and no others, then clear those values from the rest of the row, column or box.
 	if unresolvedCnt > 3 {
 		for j1 := 0; j1 < 7; j1++ {
 			if sqrPaired[j1] {
