@@ -42,6 +42,14 @@ const (
 	analyseBox
 )
 
+type RCBselect int
+
+const (
+	row RCBselect = iota
+	column
+	box
+)
+
 type UpdateMsg struct {
 	val    squareVal
 	action Action
@@ -313,8 +321,8 @@ func inspectRow(r, c int) {
 		}
 	}
 	// Do some harder Sudoku solving.
-	checkConstrainedSquares(unplacedValues, r, true, colPos)
-	checkConstrainedValues(r, true)
+	checkConstrainedSquares(unplacedValues, r, row, colPos)
+	checkConstrainedValues(r, row)
 }
 
 func inspectCol(r, c int) {
@@ -359,228 +367,8 @@ func inspectCol(r, c int) {
 		}
 	}
 	// Do some harder Sudoku solving.
-	checkConstrainedSquares(unplacedValues, c, false, rowPos)
-	checkConstrainedValues(c, false)
-}
-
-func checkConstrainedSquares(unplacedValues squareVal, rc int, isRow bool, rcPos map[squareVal][]int) {
-	// If two values are only found in two squares, then those squares cannot have any other value.
-	if bits.OnesCount16(uint16(unplacedValues)) > 2 {
-		for val1 := one; val1 <= eight; val1 <<= 1 {
-			if unplacedValues&val1 == 0 {
-				continue
-			}
-			for val2 := val1 << 1; val2 <= nine; val2 <<= 1 {
-				if unplacedValues&val2 == 0 {
-					continue
-				}
-				posArray := make([]int, 0, 3)
-				var posMap uint16
-				cnt := 0
-				for _, i := range rcPos[val1] {
-					if cnt > 2 {
-						break
-					}
-					if posMap&(1<<i) == 0 {
-						posMap |= 1 << i
-						posArray = append(posArray, i)
-						cnt++
-					}
-				}
-				for _, i := range rcPos[val2] {
-					if cnt > 2 {
-						break
-					}
-					if posMap&(1<<i) == 0 {
-						posMap |= 1 << i
-						posArray = append(posArray, i)
-						cnt++
-					}
-				}
-				if cnt == 2 {
-					// These two values can only be placed in two squares.  Clear all other possible values of those squares.
-					clearVal := blank &^ (val1 | val2)
-					if isRow {
-						bufferChan <- UpdateMsg{clearVal, clear, rc, posArray[0]}
-						bufferChan <- UpdateMsg{clearVal, clear, rc, posArray[1]}
-					} else {
-						bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rc}
-						bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rc}
-					}
-				}
-			}
-		}
-	}
-
-	// If three values are only found in three squares, then those squares cannot have any other value.
-	if bits.OnesCount16(uint16(unplacedValues)) > 3 {
-		for val1 := one; val1 <= seven; val1 <<= 1 {
-			if unplacedValues&val1 == 0 {
-				continue
-			}
-			for val2 := val1 << 1; val2 <= eight; val2 <<= 1 {
-				if unplacedValues&val2 == 0 {
-					continue
-				}
-				for val3 := val2 << 1; val3 <= nine; val3 <<= 1 {
-					if unplacedValues&val2 == 0 {
-						continue
-					}
-					posArray := make([]int, 0, 4)
-					var posMap uint16
-					cnt := 0
-					for _, i := range rcPos[val1] {
-						if cnt > 3 {
-							break
-						}
-						if posMap&(1<<i) == 0 {
-							posMap |= 1 << i
-							posArray = append(posArray, i)
-							cnt++
-						}
-					}
-					for _, i := range rcPos[val2] {
-						if cnt > 3 {
-							break
-						}
-						if posMap&(1<<i) == 0 {
-							posMap |= 1 << i
-							posArray = append(posArray, i)
-							cnt++
-						}
-					}
-					for _, i := range rcPos[val3] {
-						if cnt > 3 {
-							break
-						}
-						if posMap&(1<<i) == 0 {
-							posMap |= 1 << i
-							posArray = append(posArray, i)
-							cnt++
-						}
-					}
-					if cnt == 3 {
-						// These three values can only be placed in three squares.  Clear all other possible values of those squares.
-						clearVal := blank &^ (val1 | val2 | val3)
-						if isRow {
-						} else {
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rc}
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rc}
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[2], rc}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-func checkConstrainedValues(rc int, isRow bool) {
-	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row.
-	var pvCnt [9]int
-	var sqrPaired [9]bool
-	unresolvedCnt := 0
-	for j := 0; j < 9; j++ {
-		if isRow {
-			pvCnt[j] = bits.OnesCount16(uint16(board[rc][j].possVal))
-		} else {
-			pvCnt[j] = bits.OnesCount16(uint16(board[j][rc].possVal))
-		}
-		if pvCnt[j] >= 2 {
-			unresolvedCnt++
-		}
-	}
-	if unresolvedCnt > 2 {
-		for j1 := 0; j1 < 8; j1++ {
-			if pvCnt[j1] != 2 {
-				continue
-			}
-			for j2 := j1 + 1; j2 < 9; j2++ {
-				if pvCnt[j2] != 2 {
-					continue
-				}
-				possVal1 := board[rc][j1].possVal
-				possVal2 := board[rc][j2].possVal
-				if !isRow {
-					possVal1 = board[j1][rc].possVal
-					possVal2 = board[j2][rc].possVal
-				}
-				if possVal1 == possVal2 {
-					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row.
-					sqrPaired[j1] = true
-					sqrPaired[j2] = true
-					for j := 0; j < 9; j++ {
-						if j == j1 || j == j2 {
-							continue
-						}
-						if isRow && board[rc][j].isFinal {
-							continue
-						}
-						if !isRow && board[j][rc].isFinal {
-							continue
-						}
-						r, c := rc, j
-						if !isRow {
-							r, c = j, rc
-						}
-						bufferChan <- UpdateMsg{possVal1, clear, r, c}
-					}
-				}
-			}
-		}
-		// If three squares can only hold the same three values and no others, then clear those values from the rest of the row.
-		if unresolvedCnt > 3 {
-			for j1 := 0; j1 < 7; j1++ {
-				if sqrPaired[j1] {
-					continue
-				}
-				if pvCnt[j1] != 2 && pvCnt[j1] != 3 {
-					continue
-				}
-				for j2 := j1 + 1; j2 < 8; j2++ {
-					if sqrPaired[j2] {
-						continue
-					}
-					if pvCnt[j2] != 2 && pvCnt[j2] != 3 {
-						continue
-					}
-					for j3 := j2 + 1; j3 < 9; j3++ {
-						if sqrPaired[j3] {
-							continue
-						}
-						if pvCnt[j3] != 2 && pvCnt[j3] != 3 {
-							continue
-						}
-						var mergeVal squareVal
-						if isRow {
-							mergeVal = board[rc][j1].possVal | board[rc][j2].possVal | board[rc][j3].possVal
-						} else {
-							mergeVal = board[j1][rc].possVal | board[j2][rc].possVal | board[j3][rc].possVal
-						}
-						if bits.OnesCount16(uint16(mergeVal)) == 3 {
-							//We found a match of three unresolved squares that each have two or three the same possible three values
-							for j := 0; j < 9; j++ {
-								if j == j1 || j == j2 || j == j3 {
-									continue
-								}
-								if isRow && board[rc][j].isFinal {
-									continue
-								}
-								if !isRow && board[j][rc].isFinal {
-									continue
-								}
-								r, c := rc, j
-								if !isRow {
-									r, c = j, rc
-								}
-								bufferChan <- UpdateMsg{mergeVal, clear, r, c}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	checkConstrainedSquares(unplacedValues, c, column, rowPos)
+	checkConstrainedValues(c, column)
 }
 
 func inspectBox(r, c int) {
@@ -588,12 +376,13 @@ func inspectBox(r, c int) {
 		r int
 		c int
 	}
+	unplacedValues := blank
+	boxRowPos := make(map[squareVal][]boxPosStruct)
+	boxColPos := make(map[squareVal][]boxPosStruct)
+	rb := r / 3 * 3
+	cb := c / 3 * 3
 	// Count and locate each possible number in the remaining squares
 	for val := one; val <= nine; val <<= 1 {
-		boxRowPos := make(map[squareVal][]boxPosStruct)
-		boxColPos := make(map[squareVal][]boxPosStruct)
-		rb := r / 3 * 3
-		cb := c / 3 * 3
 		for i := rb; i < rb+3; i++ {
 			for j := cb; j < cb+3; j++ {
 				if board[i][j].possVal&val == val {
@@ -620,6 +409,7 @@ func inspectBox(r, c int) {
 		if len(boxRowPos[val]) == 1 {
 			rPos := boxRowPos[val][0].r
 			cPos := boxRowPos[val][0].c
+			unplacedValues &^= val
 			if !board[rPos][cPos].isFinal {
 				bufferChan <- UpdateMsg{val, set, rPos, cPos}
 			}
@@ -649,6 +439,283 @@ func inspectBox(r, c int) {
 					}
 					for ri := rb; ri < rb+3; ri++ {
 						bufferChan <- UpdateMsg{val, clear, ri, ci}
+					}
+				}
+			}
+		}
+	}
+	boxPos := make(map[squareVal][]int)
+	for val := one; val <= nine; val <<= 1 {
+		for _, bp := range boxRowPos[val] {
+			i := bp.r % 3
+			j := bp.c % 3
+			boxPos[val] = append(boxPos[val], 3*i+j)
+		}
+	}
+	rb /= 3
+	cb /= 3
+	checkConstrainedSquares(unplacedValues, 3*rb+cb, box, boxPos)
+	checkConstrainedValues(3*rb+cb, box)
+}
+
+func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB RCBselect, rcbPos map[squareVal][]int) {
+	// If two values are only found in two squares, then those squares cannot have any other value.
+	if bits.OnesCount16(uint16(unplacedValues)) > 2 {
+		for val1 := one; val1 <= eight; val1 <<= 1 {
+			if unplacedValues&val1 == 0 {
+				continue
+			}
+			for val2 := val1 << 1; val2 <= nine; val2 <<= 1 {
+				if unplacedValues&val2 == 0 {
+					continue
+				}
+				posArray := make([]int, 0, 3)
+				var posMap uint16
+				cnt := 0
+				for _, i := range rcbPos[val1] {
+					if cnt > 2 {
+						break
+					}
+					if posMap&(1<<i) == 0 {
+						posMap |= 1 << i
+						posArray = append(posArray, i)
+						cnt++
+					}
+				}
+				for _, i := range rcbPos[val2] {
+					if cnt > 2 {
+						break
+					}
+					if posMap&(1<<i) == 0 {
+						posMap |= 1 << i
+						posArray = append(posArray, i)
+						cnt++
+					}
+				}
+				if cnt == 2 {
+					// These two values can only be placed in two squares.  Clear all other possible values of those squares.
+					clearVal := blank &^ (val1 | val2)
+					switch isRCB {
+					case row:
+						bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[0]}
+						bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[1]}
+					case column:
+						bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rcb}
+						bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rcb}
+					case box:
+						rbox, cbox := rcb/3*3, rcb%3*3
+						bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[0]/3, cbox + posArray[0]%3}
+						bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[1]/3, cbox + posArray[0]%3}
+					}
+				}
+			}
+		}
+	}
+
+	// If three values are only found in three squares, then those squares cannot have any other value.
+	if bits.OnesCount16(uint16(unplacedValues)) > 3 {
+		for val1 := one; val1 <= seven; val1 <<= 1 {
+			if unplacedValues&val1 == 0 {
+				continue
+			}
+			for val2 := val1 << 1; val2 <= eight; val2 <<= 1 {
+				if unplacedValues&val2 == 0 {
+					continue
+				}
+				for val3 := val2 << 1; val3 <= nine; val3 <<= 1 {
+					if unplacedValues&val2 == 0 {
+						continue
+					}
+					posArray := make([]int, 0, 4)
+					var posMap uint16
+					cnt := 0
+					for _, i := range rcbPos[val1] {
+						if cnt > 3 {
+							break
+						}
+						if posMap&(1<<i) == 0 {
+							posMap |= 1 << i
+							posArray = append(posArray, i)
+							cnt++
+						}
+					}
+					for _, i := range rcbPos[val2] {
+						if cnt > 3 {
+							break
+						}
+						if posMap&(1<<i) == 0 {
+							posMap |= 1 << i
+							posArray = append(posArray, i)
+							cnt++
+						}
+					}
+					for _, i := range rcbPos[val3] {
+						if cnt > 3 {
+							break
+						}
+						if posMap&(1<<i) == 0 {
+							posMap |= 1 << i
+							posArray = append(posArray, i)
+							cnt++
+						}
+					}
+					if cnt == 3 {
+						// These three values can only be placed in three squares.  Clear all other possible values of those squares.
+						clearVal := blank &^ (val1 | val2 | val3)
+						switch isRCB {
+						case row:
+							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[0]}
+							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[1]}
+							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[2]}
+						case column:
+							bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rcb}
+							bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rcb}
+							bufferChan <- UpdateMsg{clearVal, clear, posArray[2], rcb}
+						case box:
+							rbox, cbox := rcb/3*3, rcb%3*3
+							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[0]/3, cbox + posArray[0]%3}
+							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[1]/3, cbox + posArray[1]%3}
+							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[2]/3, cbox + posArray[2]%3}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func boxpos(b, j int) (r, c int) {
+	r = b/3*3 + j/3
+	c = b%3*3 + j%3
+	return
+}
+
+func checkConstrainedValues(rcb int, isRCB RCBselect) {
+	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row.
+	var pvCnt [9]int
+	var sqrPaired [9]bool
+	unresolvedCnt := 0
+
+	for j := 0; j < 9; j++ {
+		switch isRCB {
+		case row:
+			pvCnt[j] = bits.OnesCount16(uint16(board[rcb][j].possVal))
+		case column:
+			pvCnt[j] = bits.OnesCount16(uint16(board[j][rcb].possVal))
+		case box:
+			r, c := boxpos(rcb, j)
+			pvCnt[j] = bits.OnesCount16(uint16(board[r][c].possVal))
+		}
+		if pvCnt[j] >= 2 {
+			unresolvedCnt++
+		}
+	}
+	if unresolvedCnt > 2 {
+		for j1 := 0; j1 < 8; j1++ {
+			if pvCnt[j1] != 2 {
+				continue
+			}
+			for j2 := j1 + 1; j2 < 9; j2++ {
+				if pvCnt[j2] != 2 {
+					continue
+				}
+				var possVal1, possVal2 squareVal
+				switch isRCB {
+				case row:
+					possVal1 = board[rcb][j1].possVal
+					possVal2 = board[rcb][j2].possVal
+				case column:
+					possVal1 = board[j1][rcb].possVal
+					possVal2 = board[j2][rcb].possVal
+				case box:
+					r1, c1 := boxpos(rcb, j1)
+					r2, c2 := boxpos(rcb, j2)
+					possVal1 = board[r1][c1].possVal
+					possVal1 = board[r2][c2].possVal
+				}
+				if possVal1 == possVal2 {
+					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row.
+					sqrPaired[j1] = true
+					sqrPaired[j2] = true
+				loop2:
+					for j := 0; j < 9; j++ {
+						var r, c int
+						if j == j1 || j == j2 {
+							continue loop2
+						}
+						switch isRCB {
+						case row:
+							r, c = rcb, j
+						case column:
+							r, c = j, rcb
+						case box:
+							r, c = boxpos(rcb, j)
+						}
+						if board[r][c].isFinal {
+							continue loop2
+						}
+						bufferChan <- UpdateMsg{possVal1, clear, r, c}
+					}
+				}
+			}
+		}
+	}
+	// If three squares can only hold the same three values and no others, then clear those values from the rest of the row.
+	if unresolvedCnt > 3 {
+		for j1 := 0; j1 < 7; j1++ {
+			if sqrPaired[j1] {
+				continue
+			}
+			if pvCnt[j1] != 2 && pvCnt[j1] != 3 {
+				continue
+			}
+			for j2 := j1 + 1; j2 < 8; j2++ {
+				if sqrPaired[j2] {
+					continue
+				}
+				if pvCnt[j2] != 2 && pvCnt[j2] != 3 {
+					continue
+				}
+				for j3 := j2 + 1; j3 < 9; j3++ {
+					if sqrPaired[j3] {
+						continue
+					}
+					if pvCnt[j3] != 2 && pvCnt[j3] != 3 {
+						continue
+					}
+					var mergeVal squareVal
+					switch isRCB {
+					case row:
+						mergeVal = board[rcb][j1].possVal | board[rcb][j2].possVal | board[rcb][j3].possVal
+					case column:
+						mergeVal = board[j1][rcb].possVal | board[j2][rcb].possVal | board[j3][rcb].possVal
+					case box:
+						r1, c1 := boxpos(rcb, j1)
+						r2, c2 := boxpos(rcb, j2)
+						r3, c3 := boxpos(rcb, j3)
+						mergeVal = board[r1][c1].possVal | board[r2][c2].possVal | board[r3][c3].possVal
+					}
+					if bits.OnesCount16(uint16(mergeVal)) == 3 {
+						// Found a match of three unresolved squares that each have two or three of the same three possible values
+					loop3:
+						for j := 0; j < 9; j++ {
+							var r, c int
+							if j == j1 || j == j2 || j == j3 {
+								continue loop3
+							}
+							switch isRCB {
+							case row:
+								r, c = rcb, j
+							case column:
+								r, c = j, rcb
+							case box:
+								r, c = boxpos(rcb, j)
+							}
+							if board[r][c].isFinal {
+								continue loop3
+							}
+							bufferChan <- UpdateMsg{mergeVal, clear, r, c}
+						}
 					}
 				}
 			}
