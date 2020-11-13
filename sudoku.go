@@ -1,8 +1,40 @@
 // Sudoku.go
+// © Peter Corbett, 2020
 //
 // This program will solve a Sudoku using the same techniques a human uses to solve Sudoku.  I.e., instead of doing a breadth first or depth first search of the possible
-// solution space, it will at each step only commit numbers to squares when that number is provably correct.
-// It uses channels and goroutines to constantly monitor as decisions are made and whether those decisions allow further choices to be made
+// solution space, it will at each step only commit numbers to squares when that number is provably correct, based entirely on what state has been deduced so far.
+// The program is structured with a go rountine monitoring each of the 81 squares of the grid, one per square.  These respond to messages on an inbound channel.  The message actions
+// are either state modifying, which are the set and clear actions.  Set is used to initially set the value of the square if it is known as an initial state (the squares that have numbers
+// to seed the puzzle.).  It is also used when the value of a square has been determined to be one of the nine possible numbers.  The clear action is used to reduce the possible
+// values a square may have.  Much of the logic of puzzle solving is to reduce the possible values of a square, eventually to a single value.  The values a square may have are stored as a bit
+// vector in a single uint16, with each bit representing one of the values from 1 to 9, and the values represented in the program by appropriately named constants ("one", "two", etc.).  For
+// squares that are not preset with a number as an initial condition, the special value "blank" is used as the first value of the square; it is simply the logical or of all the possible
+// single number values, ie. 511 decimal, 0x1FF hex.
+// Solving the sudoku involves several logic steps.
+// 1. if a squares possible values have been reduced to one, then the square is finalized to that value.  The simplest way to exclude values is when one of the squares neighbors (in its row,
+// column or block) has been finalized to have that value.  More complex cases occur when, for example, two squares in a row, column or block have been reduced to having the same two possible values;
+// that excludes those values from the rest of the row, column or block.
+// 2. if in a row, column, or block, there is only one place where a particular value can be placed.
+// 3. if in a row, for example, the only place a value can be placed is within a group of three squares that are in the same block, then that value can not be placed elsewhere in that block.  The same
+// holds in reverse, and the same holds between columns and blocks.
+// 4. If two (or three) values are contrained to two (or three) squares in a row, column or block, then those two or three squares cannot hold any other value.
+// 5. If two (or three) squares all hold the same two (or three) values and no other possible values, then those values cannot appear elsewhere in the row, column or block.
+//
+// The square monitor threads are the only threads that can change the value (or possible value) of a square, and they do so only at a presribed time, described as the beginning of a round.
+// A round consists of a period where the square monitors process set and clear messages from their queues.  As they do that, they can send set and clear messages to other squares in their row, column or block.
+// To avoid race conditions, the sent messages are sent first to a single channel, where they are queued for processing later in the round.
+// The roundLooper go routine collects these messages.  The square monitors will process messages until they receive a pause message.  That tells them to release their hold on a waitgroup.  They then go back to
+// listening on their incoming channel.  When the round looper wakes on the round counter waitgroup going to zero, it will forward all enqueued messages to the listening square monitors.  However, it will not forward
+// additional messages as they arrive - it inspects the cnt of messages in its channel and forwards only that number.  It then sends a pause message to each square monitor.  When that phase of the round is complete,
+// the round looper will send 27 messages to 27 of the square monitor threads, each of which initiates that thread to do analysis of one row, column or block.  This is where more complex scenarios are discovered, as
+// described in 4 and 5 above.  Those threads will send new set and clear messages, which again a enqueued on the round loopers buffer channel, and are fowarded to the square monitors only after the waitgroup goes to zero.
+//
+// The entire program begins to wrap up once a waitgroup that counts the number of remaining unfinalized squares goes to zero.  At that point, an abort channel is closed, which acts as a broadcast to all threads to
+// clean up and exit.  As each thread exits, it releases its hold on a thread count wait group.  All channels are closed.  When all threads except main have completed, main will complete and the program exits.
+//
+// Output to stdout is completed at the beginning when the puzzle's initial values are known, and at the completion of each round.  The output uses unicode characters to print a sudoku board.  The quality of this
+// presentation depends on the character renderings in the terminal or printer, but for the most part, the boards are very legible.  An html output would possibly give a better rendering.
+//
 package main
 
 import (
@@ -27,44 +59,43 @@ const (
 )
 const blank = one | two | three | four | five | six | seven | eight | nine
 
-const sleep_msec = 10
-const max_bufferchan = 40 * 20
-const max_inchan = 50
+const maxBufferchan = 40 * 20
+const maxInchan = 50
 
-type Action int
+type action int
 
 const (
-	set Action = iota
+	set action = iota
 	clear
 	pause
 	analyseRow
 	analyseCol
-	analyseBox
+	analyseBlock
 )
 
-type RCBselect int
+type rcbSelect int
 
 const (
-	row RCBselect = iota
+	row rcbSelect = iota
 	column
-	box
+	block
 )
 
-type UpdateMsg struct {
+type updateMsg struct {
 	val    squareVal
-	action Action
+	action action
 	destR  int
 	destC  int
 }
 
 type square struct {
 	possVal squareVal
-	inChan  chan UpdateMsg
+	inChan  chan updateMsg
 	isFinal bool
 }
 
 var abortChan chan struct{}
-var bufferChan chan UpdateMsg
+var bufferChan chan updateMsg
 var board [9][9]square
 var wgRound sync.WaitGroup
 
@@ -85,12 +116,12 @@ func main() {
 	for i := 0; i < 9; i++ {
 		for j := 0; j < 9; j++ {
 			board[i][j].possVal = blank
-			board[i][j].inChan = make(chan UpdateMsg, max_inchan)
+			board[i][j].inChan = make(chan updateMsg, maxInchan)
 			board[i][j].isFinal = false
 			go squareMonitor(i, j)
 		}
 	}
-	bufferChan = make(chan UpdateMsg, max_bufferchan)
+	bufferChan = make(chan updateMsg, maxBufferchan)
 	go roundLooper()
 
 	err := captureBoard(os.Args[1])
@@ -126,7 +157,7 @@ func roundLooper() {
 	pauseMonitors := func() {
 		for i := 0; i < 9; i++ {
 			for j := 0; j < 9; j++ {
-				board[i][j].inChan <- UpdateMsg{action: pause}
+				board[i][j].inChan <- updateMsg{action: pause}
 			}
 		}
 		wgRound.Wait()
@@ -160,14 +191,14 @@ func roundLooper() {
 
 func inspectRCB() {
 	for i := 0; i < 9; i++ {
-		board[i][i].inChan <- UpdateMsg{action: analyseRow}
+		board[i][i].inChan <- updateMsg{action: analyseRow}
 	}
 	for i := 0; i < 9; i++ {
-		board[i][(i+1)%9].inChan <- UpdateMsg{action: analyseCol}
+		board[i][(i+1)%9].inChan <- updateMsg{action: analyseCol}
 	}
 	for i := 0; i < 9; i += 3 {
 		for j := 2; j < 9; j += 3 {
-			board[i][j].inChan <- UpdateMsg{action: analyseBox}
+			board[i][j].inChan <- updateMsg{action: analyseBlock}
 		}
 	}
 }
@@ -187,7 +218,7 @@ outerloop:
 					sqr.possVal = msg.val
 					if finalCheckVal(sqr.possVal) {
 						sqr.isFinal = true
-						sendUpdates(i, j, UpdateMsg{msg.val, clear, -1, -1})
+						sendUpdates(i, j, updateMsg{msg.val, clear, -1, -1})
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
 						wgSqrsDone.Add(-1)
 					}
@@ -204,7 +235,7 @@ outerloop:
 					sqr.possVal = newval
 					if finalCheckVal(sqr.possVal) {
 						sqr.isFinal = true
-						sendUpdates(i, j, UpdateMsg{newval, clear, -1, -1})
+						sendUpdates(i, j, updateMsg{newval, clear, -1, -1})
 						// WaitGroup 3 triggers completion of sudoku when all squares have been finalized
 						wgSqrsDone.Add(-1)
 					}
@@ -217,8 +248,8 @@ outerloop:
 			case analyseCol:
 				inspectCol(i, j)
 				wgRCB.Done()
-			case analyseBox:
-				inspectBox(i, j)
+			case analyseBlock:
+				inspectBlock(i, j)
 				wgRCB.Done()
 			default:
 				panic("Should always have an action")
@@ -234,7 +265,7 @@ outerloop:
 	}
 }
 
-func sendUpdates(r, c int, msg UpdateMsg) {
+func sendUpdates(r, c int, msg updateMsg) {
 	// Update the rest of the row
 	for j := 0; j < 9; j++ {
 		if j == c {
@@ -298,15 +329,15 @@ func inspectRow(r, c int) {
 			unplacedValues &^= val
 			cPos := colPos[val][0]
 			if !board[r][cPos].isFinal {
-				bufferChan <- UpdateMsg{val, set, r, cPos}
+				bufferChan <- updateMsg{val, set, r, cPos}
 			}
 		} else {
-			// Check if all possible locations for the number are within the same box
+			// Check if all possible locations for the number are within the same block
 			cPosLow := colPos[val][0]
 			cPosLast := len(colPos[val]) - 1
 			cPosHigh := colPos[val][cPosLast]
 			if cPosLow/3 == cPosHigh/3 {
-				// All instances of the number are in the same box.
+				// All instances of the number are in the same block.
 				cb := cPosLow / 3 * 3
 				rb := r / 3 * 3
 				for ri := rb; ri < rb+3; ri++ {
@@ -314,7 +345,7 @@ func inspectRow(r, c int) {
 						continue
 					}
 					for ci := cb; ci < cb+3; ci++ {
-						bufferChan <- UpdateMsg{val, clear, ri, ci}
+						bufferChan <- updateMsg{val, clear, ri, ci}
 					}
 				}
 			}
@@ -344,15 +375,15 @@ func inspectCol(r, c int) {
 			unplacedValues &^= val
 			rPos := rowPos[val][0]
 			if !board[rPos][c].isFinal {
-				bufferChan <- UpdateMsg{val, set, rPos, c}
+				bufferChan <- updateMsg{val, set, rPos, c}
 			}
 		} else {
-			// Check if all possible locations for the number are within the same box
+			// Check if all possible locations for the number are within the same block
 			rPosLow := rowPos[val][0]
 			rPosLast := len(rowPos[val]) - 1
 			rPosHigh := rowPos[val][rPosLast]
 			if rPosLow/3 == rPosHigh/3 {
-				// All instances of the number are in the same box.
+				// All instances of the number are in the same block.
 				rb := rPosLow / 3 * 3
 				cb := c / 3 * 3
 				for ci := cb; ci < cb+3; ci++ {
@@ -360,7 +391,7 @@ func inspectCol(r, c int) {
 						continue
 					}
 					for ri := rb; ri < rb+3; ri++ {
-						bufferChan <- UpdateMsg{val, clear, ri, ci}
+						bufferChan <- updateMsg{val, clear, ri, ci}
 					}
 				}
 			}
@@ -371,14 +402,14 @@ func inspectCol(r, c int) {
 	checkConstrainedValues(c, column)
 }
 
-func inspectBox(r, c int) {
-	type boxPosStruct struct {
+func inspectBlock(r, c int) {
+	type blockPosStruct struct {
 		r int
 		c int
 	}
 	unplacedValues := blank
-	boxRowPos := make(map[squareVal][]boxPosStruct)
-	boxColPos := make(map[squareVal][]boxPosStruct)
+	blockRowPos := make(map[squareVal][]blockPosStruct)
+	blockColPos := make(map[squareVal][]blockPosStruct)
 	rb := r / 3 * 3
 	cb := c / 3 * 3
 	// Count and locate each possible number in the remaining squares
@@ -387,7 +418,7 @@ func inspectBox(r, c int) {
 			for j := cb; j < cb+3; j++ {
 				if board[i][j].possVal&val == val {
 					// square could be this value
-					boxRowPos[val] = append(boxRowPos[val], boxPosStruct{i, j})
+					blockRowPos[val] = append(blockRowPos[val], blockPosStruct{i, j})
 				}
 			}
 		}
@@ -395,70 +426,70 @@ func inspectBox(r, c int) {
 			for i := rb; i < rb+3; i++ {
 				if board[i][j].possVal&val == val {
 					// square could be this value
-					boxColPos[val] = append(boxColPos[val], boxPosStruct{i, j})
+					blockColPos[val] = append(blockColPos[val], blockPosStruct{i, j})
 				}
 			}
 		}
-		if len(boxRowPos[val]) != len(boxColPos[val]) {
+		if len(blockRowPos[val]) != len(blockColPos[val]) {
 			panic("these should be equal")
 		}
-		if len(boxRowPos[val]) == 0 {
-			panic("this is a problem, number not found in box")
+		if len(blockRowPos[val]) == 0 {
+			panic("this is a problem, number not found in block")
 		}
-		// Check for previously unknown singletons in the box
-		if len(boxRowPos[val]) == 1 {
-			rPos := boxRowPos[val][0].r
-			cPos := boxRowPos[val][0].c
+		// Check for previously unknown singletons in the block
+		if len(blockRowPos[val]) == 1 {
+			rPos := blockRowPos[val][0].r
+			cPos := blockRowPos[val][0].c
 			unplacedValues &^= val
 			if !board[rPos][cPos].isFinal {
-				bufferChan <- UpdateMsg{val, set, rPos, cPos}
+				bufferChan <- updateMsg{val, set, rPos, cPos}
 			}
 		} else {
 			// Check if all possible locations for the number are within the same row or column
-			boxPosLast := len(boxRowPos[val]) - 1
-			rPosLow := boxRowPos[val][0].r
-			rPosHigh := boxRowPos[val][boxPosLast].r
-			cPosLow := boxColPos[val][0].c
-			cPosHigh := boxColPos[val][boxPosLast].c
+			blockPosLast := len(blockRowPos[val]) - 1
+			rPosLow := blockRowPos[val][0].r
+			rPosHigh := blockRowPos[val][blockPosLast].r
+			cPosLow := blockColPos[val][0].c
+			cPosHigh := blockColPos[val][blockPosLast].c
 			if rPosLow == rPosHigh {
-				// All possible locations of the number in this box are in the same row.
+				// All possible locations of the number in this block are in the same row.
 				for ri := rb; ri < rb+3; ri++ {
 					if ri == rPosLow {
 						continue
 					}
 					for ci := cb; ci < cb+3; ci++ {
-						bufferChan <- UpdateMsg{val, clear, ri, ci}
+						bufferChan <- updateMsg{val, clear, ri, ci}
 					}
 				}
 			}
 			if cPosLow == cPosHigh {
-				// All possible locations of the number in this box are in the same column.
+				// All possible locations of the number in this block are in the same column.
 				for ci := cb; ci < cb+3; ci++ {
 					if ci == cPosLow {
 						continue
 					}
 					for ri := rb; ri < rb+3; ri++ {
-						bufferChan <- UpdateMsg{val, clear, ri, ci}
+						bufferChan <- updateMsg{val, clear, ri, ci}
 					}
 				}
 			}
 		}
 	}
-	boxPos := make(map[squareVal][]int)
+	blockPos := make(map[squareVal][]int)
 	for val := one; val <= nine; val <<= 1 {
-		for _, bp := range boxRowPos[val] {
+		for _, bp := range blockRowPos[val] {
 			i := bp.r % 3
 			j := bp.c % 3
-			boxPos[val] = append(boxPos[val], 3*i+j)
+			blockPos[val] = append(blockPos[val], 3*i+j)
 		}
 	}
 	rb /= 3
 	cb /= 3
-	checkConstrainedSquares(unplacedValues, 3*rb+cb, box, boxPos)
-	checkConstrainedValues(3*rb+cb, box)
+	checkConstrainedSquares(unplacedValues, 3*rb+cb, block, blockPos)
+	checkConstrainedValues(3*rb+cb, block)
 }
 
-func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB RCBselect, rcbPos map[squareVal][]int) {
+func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB rcbSelect, rcbPos map[squareVal][]int) {
 	// If two values are only found in two squares, then those squares cannot have any other value.
 	if bits.OnesCount16(uint16(unplacedValues)) > 2 {
 		for val1 := one; val1 <= eight; val1 <<= 1 {
@@ -497,15 +528,15 @@ func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB RCBselect,
 					clearVal := blank &^ (val1 | val2)
 					switch isRCB {
 					case row:
-						bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[0]}
-						bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[1]}
+						bufferChan <- updateMsg{clearVal, clear, rcb, posArray[0]}
+						bufferChan <- updateMsg{clearVal, clear, rcb, posArray[1]}
 					case column:
-						bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rcb}
-						bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rcb}
-					case box:
-						rbox, cbox := rcb/3*3, rcb%3*3
-						bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[0]/3, cbox + posArray[0]%3}
-						bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[1]/3, cbox + posArray[0]%3}
+						bufferChan <- updateMsg{clearVal, clear, posArray[0], rcb}
+						bufferChan <- updateMsg{clearVal, clear, posArray[1], rcb}
+					case block:
+						rblock, cblock := rcb/3*3, rcb%3*3
+						bufferChan <- updateMsg{clearVal, clear, rblock + posArray[0]/3, cblock + posArray[0]%3}
+						bufferChan <- updateMsg{clearVal, clear, rblock + posArray[1]/3, cblock + posArray[0]%3}
 					}
 				}
 			}
@@ -564,18 +595,18 @@ func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB RCBselect,
 						clearVal := blank &^ (val1 | val2 | val3)
 						switch isRCB {
 						case row:
-							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[0]}
-							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[1]}
-							bufferChan <- UpdateMsg{clearVal, clear, rcb, posArray[2]}
+							bufferChan <- updateMsg{clearVal, clear, rcb, posArray[0]}
+							bufferChan <- updateMsg{clearVal, clear, rcb, posArray[1]}
+							bufferChan <- updateMsg{clearVal, clear, rcb, posArray[2]}
 						case column:
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[0], rcb}
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[1], rcb}
-							bufferChan <- UpdateMsg{clearVal, clear, posArray[2], rcb}
-						case box:
-							rbox, cbox := rcb/3*3, rcb%3*3
-							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[0]/3, cbox + posArray[0]%3}
-							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[1]/3, cbox + posArray[1]%3}
-							bufferChan <- UpdateMsg{clearVal, clear, rbox + posArray[2]/3, cbox + posArray[2]%3}
+							bufferChan <- updateMsg{clearVal, clear, posArray[0], rcb}
+							bufferChan <- updateMsg{clearVal, clear, posArray[1], rcb}
+							bufferChan <- updateMsg{clearVal, clear, posArray[2], rcb}
+						case block:
+							rblock, cblock := rcb/3*3, rcb%3*3
+							bufferChan <- updateMsg{clearVal, clear, rblock + posArray[0]/3, cblock + posArray[0]%3}
+							bufferChan <- updateMsg{clearVal, clear, rblock + posArray[1]/3, cblock + posArray[1]%3}
+							bufferChan <- updateMsg{clearVal, clear, rblock + posArray[2]/3, cblock + posArray[2]%3}
 						}
 					}
 				}
@@ -584,17 +615,17 @@ func checkConstrainedSquares(unplacedValues squareVal, rcb int, isRCB RCBselect,
 	}
 }
 
-func boxpos(b, j int) (r, c int) {
-	r = b/3*3 + j/3
-	c = b%3*3 + j%3
-	return
-}
-
-func checkConstrainedValues(rcb int, isRCB RCBselect) {
-	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row, column or box.
+func checkConstrainedValues(rcb int, isRCB rcbSelect) {
+	// If two squares can only hold the same two values and no others, then clear those values from the rest of the row, column or block.
 	var pvCnt [9]int
 	var sqrPaired [9]bool
 	unresolvedCnt := 0
+
+	blockpos := func(b, j int) (r, c int) {
+		r = b/3*3 + j/3
+		c = b%3*3 + j%3
+		return
+	}
 
 	for j := 0; j < 9; j++ {
 		switch isRCB {
@@ -602,8 +633,8 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 			pvCnt[j] = bits.OnesCount16(uint16(board[rcb][j].possVal))
 		case column:
 			pvCnt[j] = bits.OnesCount16(uint16(board[j][rcb].possVal))
-		case box:
-			r, c := boxpos(rcb, j)
+		case block:
+			r, c := blockpos(rcb, j)
 			pvCnt[j] = bits.OnesCount16(uint16(board[r][c].possVal))
 		}
 		if pvCnt[j] >= 2 {
@@ -627,14 +658,14 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 				case column:
 					possVal1 = board[j1][rcb].possVal
 					possVal2 = board[j2][rcb].possVal
-				case box:
-					r1, c1 := boxpos(rcb, j1)
-					r2, c2 := boxpos(rcb, j2)
+				case block:
+					r1, c1 := blockpos(rcb, j1)
+					r2, c2 := blockpos(rcb, j2)
 					possVal1 = board[r1][c1].possVal
 					possVal1 = board[r2][c2].possVal
 				}
 				if possVal1 == possVal2 {
-					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row, column or box.
+					// We found a match of two squares that have the same two possible values. Clear those values from other squares in the row, column or block.
 					sqrPaired[j1] = true
 					sqrPaired[j2] = true
 				loop2:
@@ -648,19 +679,19 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 							r, c = rcb, j
 						case column:
 							r, c = j, rcb
-						case box:
-							r, c = boxpos(rcb, j)
+						case block:
+							r, c = blockpos(rcb, j)
 						}
 						if board[r][c].isFinal {
 							continue loop2
 						}
-						bufferChan <- UpdateMsg{possVal1, clear, r, c}
+						bufferChan <- updateMsg{possVal1, clear, r, c}
 					}
 				}
 			}
 		}
 	}
-	// If three squares can only hold the same three values and no others, then clear those values from the rest of the row, column or box.
+	// If three squares can only hold the same three values and no others, then clear those values from the rest of the row, column or block.
 	if unresolvedCnt > 3 {
 		for j1 := 0; j1 < 7; j1++ {
 			if sqrPaired[j1] {
@@ -689,10 +720,10 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 						mergeVal = board[rcb][j1].possVal | board[rcb][j2].possVal | board[rcb][j3].possVal
 					case column:
 						mergeVal = board[j1][rcb].possVal | board[j2][rcb].possVal | board[j3][rcb].possVal
-					case box:
-						r1, c1 := boxpos(rcb, j1)
-						r2, c2 := boxpos(rcb, j2)
-						r3, c3 := boxpos(rcb, j3)
+					case block:
+						r1, c1 := blockpos(rcb, j1)
+						r2, c2 := blockpos(rcb, j2)
+						r3, c3 := blockpos(rcb, j3)
 						mergeVal = board[r1][c1].possVal | board[r2][c2].possVal | board[r3][c3].possVal
 					}
 					if bits.OnesCount16(uint16(mergeVal)) == 3 {
@@ -708,13 +739,13 @@ func checkConstrainedValues(rcb int, isRCB RCBselect) {
 								r, c = rcb, j
 							case column:
 								r, c = j, rcb
-							case box:
-								r, c = boxpos(rcb, j)
+							case block:
+								r, c = blockpos(rcb, j)
 							}
 							if board[r][c].isFinal {
 								continue loop3
 							}
-							bufferChan <- UpdateMsg{mergeVal, clear, r, c}
+							bufferChan <- updateMsg{mergeVal, clear, r, c}
 						}
 					}
 				}
@@ -753,8 +784,8 @@ func captureBoard(inFileName string) error {
 			if iv[j] < 0 || iv[j] > 9 {
 				return fmt.Errorf("Invalid input line %d, position %d", i, j)
 			} else {
-				board[i][j].inChan <- UpdateMsg{intToVal[iv[j]], set, i, j}
-				board[i][j].inChan <- UpdateMsg{action: pause}
+				board[i][j].inChan <- updateMsg{intToVal[iv[j]], set, i, j}
+				board[i][j].inChan <- updateMsg{action: pause}
 			}
 		}
 	}
