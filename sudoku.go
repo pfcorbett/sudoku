@@ -145,11 +145,13 @@ func roundLooper() {
 		}
 
 		// Forward all the enqueued messages
-		for msg := range bufferChan {
-			board[msg.destR][msg.destC].inChan <- msg
-			cnt--
-			if cnt == 0 {
-				break
+		if cnt > 0 {
+			for msg := range bufferChan {
+				board[msg.destR][msg.destC].inChan <- msg
+				cnt--
+				if cnt == 0 {
+					break
+				}
 			}
 		}
 	}
